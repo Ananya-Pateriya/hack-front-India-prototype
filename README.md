@@ -61,6 +61,7 @@ Push this repo to GitHub, then share.streamlit.io -> New app -> `app.py`.
 - Fridge-door sensing and consumption tracking are simulated (buttons).
 - Reminders only, not medical advice. Do not enter real medication on a public demo.
 - The medication day rolls over at 05:00 IST, and times use a fixed +05:30 offset.
+- the tesseract spec may not work due to incompatibility issue.
 
 ## Layout
 
