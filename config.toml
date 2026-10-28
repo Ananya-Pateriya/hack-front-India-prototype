@@ -1,0 +1,10 @@
+toml
+[theme]
+base = "light"
+primaryColor = "#0e7490"
+backgroundColor = "#f4f9fb"
+secondaryBackgroundColor = "#e6f2f6"
+textColor = "#0f172a"
+
+[browser]
+gatherUsageStats = false
