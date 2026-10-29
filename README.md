@@ -76,4 +76,4 @@ Push this repo to GitHub, then share.streamlit.io -> New app -> `app.py`.
 | `door_watcher.py` | Hardware-side loop (simulated sensor by default) |
 | `tests/test_core.py` | Unit tests and a headless app run |
 
-APP URL : http://localhost:8501/
+**To run the app type -" python -m streamlit run code_files/app.py" in the terminal of your pc.
