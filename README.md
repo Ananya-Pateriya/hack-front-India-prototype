@@ -53,3 +53,6 @@ pytest -q
 ```
 
 See [START_HERE.md](START_HERE.md) for beginner-friendly Windows setup and demo steps.
+
+## Live App URL
+- https://hack-front-india-prototype-3xpdwbc9xyv68dt6fyowra.streamlit.app/
