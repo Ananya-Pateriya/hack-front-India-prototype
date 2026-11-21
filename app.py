@@ -1,7 +1,7 @@
 """FrostMind: smart fridge and health assistant (Streamlit prototype).
 
-Run locally:  streamlit run app.py
-Persist data: FROSTMIND_DB=inventory.db streamlit run app.py
+Run locally:  python -m streamlit run source_code_files/app.py
+Persist data: FROSTMIND_DB=inventory.db python -m streamlit run source_code_files/app.py
 """
 from __future__ import annotations
 
@@ -17,11 +17,12 @@ import pandas as pd
 import streamlit as st
 
 import ui
-from db import FridgeDB
+from db import FLATMATES, FridgeDB
 from engine import (build_ambient_card, days_left, food_status, freshness,
                     meal_for_hour, now_ist, schedule_day)
 from knowledge import MEALS
 from receipts import fingerprint, ocr_image, parse_receipt, to_rows
+from sarvam_voice import speak_card, transcribe_voice
 
 st.set_page_config(page_title="FrostMind", page_icon="🧊", layout="wide")
 
@@ -83,19 +84,23 @@ def cb_parse(today_iso: str) -> None:
         res = {"kind": "error", "msg": "No groceries recognised. Check the text, "
                "or add the item to SHELF_LIFE_DB in knowledge.py."}
     else:
-        outcome = get_db().add_receipt(fingerprint(text, today), rows)
+        is_flatmate = st.session_state.get("segment_mode", "").startswith("🏢")
+        owner = st.session_state.get("item_owner", "Shared") if is_flatmate else "Shared"
+        outcome = get_db().add_receipt(f"{fingerprint(text, today)}:{owner}", rows, owner=owner)
         if outcome is None:
             res = {"kind": "warning", "msg": "This receipt is already logged for this "
-                   "date, so nothing changed. (Prevents accidental double-counting.)"}
+                   "date and owner, so nothing changed."}
         else:
             new, merged = outcome
             msg = f"Logged {new} new item{'s' if new != 1 else ''}"
             msg += f" and merged {merged} into existing stock." if merged else "."
+            if is_flatmate:
+                msg += f" Tagged as {owner}."
             skipped = len(parsed) - len(rows)
             if skipped:
                 msg += f" Skipped {skipped} non-grocery line{'s' if skipped != 1 else ''}."
             res = {"kind": "success", "msg": msg}
-            flash(f"Logged {new + merged} items")
+            flash(f"Logged {new + merged} items ({owner})")
     st.session_state.parse_result = {**res, "trace": trace}
 
 
@@ -107,7 +112,7 @@ def cb_load_demo(today_iso: str) -> None:
 @guarded
 def cb_reset() -> None:
     get_db().reset()
-    for key in ("parse_result", "door_open", "ocr_sig", "ocr_msg"):
+    for key in ("parse_result", "door_open", "ocr_sig", "ocr_msg", "voice_sig"):
         st.session_state.pop(key, None)
     st.session_state.receipt_text = SAMPLE_RECEIPT
     flash("Demo reset to a clean fridge", "🧹")
@@ -147,6 +152,8 @@ def cb_view(view: str) -> None:
 
 
 def taken_buttons(card: dict, day_iso: str, prefix: str) -> None:
+    if card.get("flatmate_mode"):
+        return
     pending = card["due"] + card["missed"]
     if not pending:
         return
@@ -158,6 +165,15 @@ def taken_buttons(card: dict, day_iso: str, prefix: str) -> None:
             args=(m["id"], day_iso, m["med_name"]))
 
 
+def render_sarvam_audio(card: dict, lang: str) -> None:
+    """Play Sarvam Bulbul TTS reminder (cached locally as WAV)."""
+    wav, err = speak_card(card, lang=lang)
+    if wav:
+        st.audio(wav, format="audio/wav", autoplay=True)
+    elif err:
+        st.warning(f"🔇 {err}")
+
+
 # ------------------------------------------------------------------ run ----
 st.markdown(ui.CSS, unsafe_allow_html=True)
 st.session_state.setdefault(
@@ -166,10 +182,18 @@ st.session_state.setdefault("receipt_text", SAMPLE_RECEIPT)
 
 with st.sidebar:
     st.markdown("### ⚙️ Demo controls")
+    segment = st.radio(
+        "User Mode (Segment)",
+        ["🏠 Family Care", "🏢 Flatmate / PG Share"],
+        key="segment_mode",
+    )
+    is_flatmate = segment.startswith("🏢")
     st.radio("View", ["Dashboard", "Door display"], key="view", horizontal=True)
     offset = st.slider("Fast-forward the fridge clock (days)", 0, 21, 0, key="offset",
                        help="Shelf life only runs out over days. Drag this to see alerts.")
     st.selectbox("Meal window", ["Auto (from clock)", *MEALS], key="meal_choice")
+    st.selectbox("Voice assistant (Sarvam AI)", ["hi-IN", "en-IN"], key="voice_lang",
+                 format_func=lambda x: "🇮🇳 Hindi (Bulbul v3)" if x == "hi-IN" else "🇮🇳 English (Bulbul v3)")
 
 now = now_ist()
 today = schedule_day(now) + dt.timedelta(days=offset)
@@ -184,7 +208,7 @@ try:
     money = db.money_stats()
     meds = db.meds()
     taken = db.doses_taken(today_iso)
-    card = build_ambient_card(db, today, meal)
+    card = build_ambient_card(db, today, meal, flatmate_mode=is_flatmate)
 except sqlite3.Error as exc:
     st.error(f"Database error: {exc}")
     st.stop()
@@ -194,19 +218,20 @@ with st.sidebar:
     c1.button("⚡ Load demo", on_click=cb_load_demo, args=(today_iso,),
               help="Logs a sample receipt so you can start instantly.")
     c2.button("🧹 Reset", on_click=cb_reset)
-    st.divider()
-    st.markdown("##### 💊 Medication schedule")
-    for m in meds:
-        a, b = st.columns([5, 1])
-        a.markdown(f"**{esc(m['med_name'])}**<br><span style='color:#64748b;font-size:.8rem'>"
-                   f"with {m['meal_window'].lower()}</span>", unsafe_allow_html=True)
-        b.button("✕", key=f"delmed_{m['id']}", on_click=cb_del_med, args=(m["id"],))
-    st.text_input("Medicine name", key="new_med", max_chars=60,
-                  placeholder="e.g. Thyronorm 50mcg")
-    st.selectbox("With which meal?", MEALS, key="new_meal")
-    st.button("Add medication", on_click=cb_add_med)
-    st.caption("⚠️ Demo only: don't enter real medication on a public link. "
-               "FrostMind gives reminders, not medical advice.")
+    if not is_flatmate:
+        st.divider()
+        st.markdown("##### 💊 Medication schedule")
+        for m in meds:
+            a, b = st.columns([5, 1])
+            a.markdown(f"**{esc(m['med_name'])}**<br><span style='color:#64748b;font-size:.8rem'>"
+                       f"with {m['meal_window'].lower()}</span>", unsafe_allow_html=True)
+            b.button("✕", key=f"delmed_{m['id']}", on_click=cb_del_med, args=(m["id"],))
+        st.text_input("Medicine name", key="new_med", max_chars=60,
+                      placeholder="e.g. Thyronorm 50mcg")
+        st.selectbox("With which meal?", MEALS, key="new_meal")
+        st.button("Add medication", on_click=cb_add_med)
+        st.caption("⚠️ Demo only: don't enter real medication on a public link. "
+                   "FrostMind gives reminders, not medical advice.")
 
 for msg, icon in st.session_state.pop("flash", []):
     st.toast(msg, icon=icon)
@@ -216,6 +241,7 @@ if st.session_state.view == "Door display":
     st.markdown(ui.KIOSK_CSS, unsafe_allow_html=True)
     st.markdown(ui.ambient_card(card, now.strftime("%I:%M %p"), kiosk=True),
                 unsafe_allow_html=True)
+    render_sarvam_audio(card, st.session_state.voice_lang)
     taken_buttons(card, today_iso, "kiosk")
     st.button("← Back to dashboard", on_click=cb_view, args=("Dashboard",))
     st.stop()
@@ -230,9 +256,13 @@ k[0].markdown(ui.kpi("In the fridge", str(int(inv.quantity.sum())) if not inv.em
 k[1].markdown(ui.kpi("Needs attention", str(attention),
                      f"{ui.inr(card['at_risk_value'])} at risk" if attention else "All good",
                      "warn" if attention else "good"), unsafe_allow_html=True)
-k[2].markdown(ui.kpi("Doses today", f"{sum(m['id'] in taken for m in meds)}/{len(meds)}",
-                     "taken", "good" if meds and all(m["id"] in taken for m in meds) else ""),
-              unsafe_allow_html=True)
+if is_flatmate:
+    shared_count = int((inv["owner"] == "Shared").sum()) if not inv.empty else 0
+    k[2].markdown(ui.kpi("Shared items", str(shared_count), "in flatmate pool"), unsafe_allow_html=True)
+else:
+    k[2].markdown(ui.kpi("Doses today", f"{sum(m['id'] in taken for m in meds)}/{len(meds)}",
+                         "taken", "good" if meds and all(m["id"] in taken for m in meds) else ""),
+                  unsafe_allow_html=True)
 k[3].markdown(ui.kpi("Food saved", ui.inr(money["consumed_value"]),
                      f"{money['consumed_qty']} item{'s' if money['consumed_qty'] != 1 else ''} used", "good"), unsafe_allow_html=True)
 k[4].markdown(ui.kpi("Food wasted", ui.inr(money["wasted_value"]),
@@ -246,8 +276,8 @@ with tab1:
     left, right = st.columns([3, 2], gap="large")
     with left:
         st.markdown("#### Step 1 · Log what you bought")
-        st.caption("Upload a photo of the receipt or paste its text. Prices, weights "
-                   "and brand names are stripped automatically.")
+        st.caption("Upload a receipt photo, speak in Hindi/Hinglish, or paste text. "
+                   "Prices, weights and brand names are stripped automatically.")
         photo = st.file_uploader("📷 Receipt photo (optional)", type=["png", "jpg", "jpeg"])
         if photo is not None:
             sig = f"{photo.name}:{photo.size}"
@@ -261,7 +291,22 @@ with tab1:
                     st.session_state.ocr_msg = ("warning", f"{err} Paste the receipt text instead.")
         if st.session_state.get("ocr_msg"):
             getattr(st, st.session_state.ocr_msg[0])(st.session_state.ocr_msg[1])
+
+        voice_clip = st.audio_input("🎙️ Or speak groceries (Hindi / Hinglish via Sarvam Saaras)")
+        if voice_clip is not None:
+            sig = f"voice:{voice_clip.size}"
+            if st.session_state.get("voice_sig") != sig:
+                st.session_state.voice_sig = sig
+                transcript, err = transcribe_voice(voice_clip.getvalue())
+                if transcript:
+                    st.session_state.receipt_text = transcript
+                    st.success(f"Heard: {transcript}")
+                else:
+                    st.error(err)
+
         st.text_area("Receipt text", key="receipt_text", height=240)
+        if is_flatmate:
+            st.selectbox("Whose groceries are these?", FLATMATES, key="item_owner")
         st.button("Parse and save", type="primary", on_click=cb_parse, args=(today_iso,))
     with right:
         st.markdown("#### What happens next")
@@ -294,6 +339,7 @@ with tab2:
         st.button("Open the fridge door", type="primary", on_click=cb_door, args=(True,))
     else:
         st.markdown(ui.ambient_card(card, now.strftime("%I:%M %p")), unsafe_allow_html=True)
+        render_sarvam_audio(card, st.session_state.voice_lang)
         st.write("")
         taken_buttons(card, today_iso, "door")
         st.button("Close the door", on_click=cb_door, args=(False,))
@@ -306,14 +352,20 @@ with tab3:
                     unsafe_allow_html=True)
     else:
         st.markdown("#### What is in the fridge")
+        if is_flatmate:
+            who_filter = st.radio("Filter by owner", ["All", *FLATMATES], horizontal=True, key="who_filter")
+            if who_filter != "All":
+                inv = inv[inv["owner"] == who_filter]
         cols = st.columns(3)
         for i, r in enumerate(inv.itertuples()):
             d = days_left(r.expiry_date, today)
             status = food_status(d)
+            owner_tag = getattr(r, "owner", "Shared") if is_flatmate else ""
             with cols[i % 3], st.container(border=True, key=f"fmcard_{r.id}"):
                 st.markdown(ui.item_card(r.item_name, int(r.quantity), status, d,
                                          freshness(r.date_added, r.expiry_date, today),
-                                         r.date_added, r.expiry_date, float(r.price)),
+                                         r.date_added, r.expiry_date, float(r.price),
+                                         owner=owner_tag),
                             unsafe_allow_html=True)
                 b1, b2 = st.columns(2)
                 b1.button("✓ Used", key=f"use_{r.id}", on_click=cb_status,
