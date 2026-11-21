@@ -33,7 +33,7 @@ A browser tab should open with FrostMind. If it does not, copy the `http://local
 8. Open **Care & Reminders** and choose the person a medicine reminder belongs to.
 
 ## Important
-- Start the unified app using `app.py`, not `archive/app1_legacy.py`.
+- Start the unified app using `app.py`.
 - You do not need a Sarvam API key to use the main app. Receipt text, pantry, Dabba, care reminders and fridge display work without it.
 - Sarvam voice requires a valid `SARVAM_API_KEY`, internet access and available account credits.
 - Receipt photo OCR additionally needs the Tesseract program installed on your computer. Pasting receipt text works without Tesseract.
